@@ -32,6 +32,10 @@ app.get('/api/quotes', async (req, res) => {
             marketData[ticker] = {
                 Price: currentPrice,
                 Change: changeString,
+                Open: data.o || currentPrice,
+                High: data.h || currentPrice,
+                Low: data.l || currentPrice,
+                PreviousClose: data.pc || currentPrice,
             };
         });
 
