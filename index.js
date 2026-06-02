@@ -78,11 +78,11 @@ app.get('/api/candles/:ticker', (req, res) => {
         const targetDirectory = path.join(__dirname, 'historical_data', 'GOOG');
         const fullFilePath = path.join(targetDirectory, fileName)
 
-        if (!fs.existsSync(fileName)) {
-            return res.status(404).json({ error: `File ${fileName} not found` });
+        if (!fs.existsSync(fullFilePath)) {
+            return res.status(404).json({ error: `File ${fullFilePath} not found` });
         }
 
-        fs.createReadStream(fileName)
+        fs.createReadStream(fullFilePath)
             .pipe(csv())
             .on('data', (row) => {
                 const unixTime = Math.floor(new Date(row.timestamp).getTime() / 1000);
