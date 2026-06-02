@@ -3,6 +3,7 @@ const axios = require('axios');
 const cors = require('cors');
 const fs = require('fs');
 const csv = require('csv-parser')
+const path = require('path')
 
 const app = express();
 app.use(cors());
@@ -63,16 +64,19 @@ app.get('/api/candles/:ticker', (req, res) => {
     const timeframe = req.query.timeframe || "D";
 
     const fileMap = {
-        'D': '/historical_data/GOOG/GOOG_1day_sample.csv',
-        'H': '/historical_data/GOOG/GOOG_1hour_sample.csv',
-        '1M': '/historical_data/GOOG/GOOG_1min_sample.csv',
-        '5M': '/historical_data/GOOG/GOOG_5min_sample.csv',
-        '30M': '/historical_data/GOOG/GOOG_30min_sample.csv',
+        'D': 'GOOG_1day_sample.csv',
+        'H': 'GOOG_1hour_sample.csv',
+        '1M': 'GOOG_1min_sample.csv',
+        '5M': 'GOOG_5min_sample.csv',
+        '30M': 'GOOG_30min_sample.csv',
     };
 
     if (requestedTicker === 'GOOG' && fileMap[timeframe]) { //onlyforgoog
         const results = [];
         const fileName = fileMap[timeframe];
+
+        const targetDirectory = path.join(__dirname, 'historical_data', 'GOOG');
+        const fullFilePath = path.join(targetDirectory, fileName)
 
         if (!fs.existsSync(fileName)) {
             return res.status(404).json({ error: `File ${fileName} not found` });
