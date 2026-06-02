@@ -85,6 +85,8 @@ app.get('/api/candles/:ticker', (req, res) => {
         fs.createReadStream(fullFilePath)
             .pipe(csv())
             .on('data', (row) => {
+                if (!row.close || !row.timestamp) return;
+                
                 const unixTime = Math.floor(new Date(row.timestamp).getTime() / 1000);
                 results.push({
                     Timestamp: unixTime,
