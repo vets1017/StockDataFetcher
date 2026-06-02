@@ -63,14 +63,14 @@ app.get('/api/candles/:ticker', (req, res) => {
     const timeframe = req.query.timeframe || "D";
 
     const fileMap = {
-        'D': 'GOOG_1day_sample.csv',
-        'H': 'GOOG_1hour_sample.csv',
-        '1M': 'GOOG_1min_sample.csv',
-        '5M': 'GOOG_5min_sample.csv',
-        '30M': 'GOOG_30min_sample.csv',
+        'D': '/historical_data/GOOG/GOOG_1day_sample.csv',
+        'H': '/historical_data/GOOG/GOOG_1hour_sample.csv',
+        '1M': '/historical_data/GOOG/GOOG_1min_sample.csv',
+        '5M': '/historical_data/GOOG/GOOG_5min_sample.csv',
+        '30M': '/historical_data/GOOG/GOOG_30min_sample.csv',
     };
 
-    if (requestedTicker === 'GOOG' && fileMap[timeframe]) {
+    if (requestedTicker === 'GOOG' && fileMap[timeframe]) { //onlyforgoog
         const results = [];
         const fileName = fileMap[timeframe];
 
