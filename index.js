@@ -61,7 +61,7 @@ app.listen(PORT, () => {
 
 app.get('/api/candles/:ticker', (req, res) => {
     const requestedTicker = req.params.ticker.toUpperCase();
-    const timeframe = req.query.timeframe || "D";
+    const timeframe = req.query.timeframe;
 
     const fileMap = {
         'D': 'GOOG_1day_sample.csv',
