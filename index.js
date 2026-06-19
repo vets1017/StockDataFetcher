@@ -2,6 +2,7 @@
 
 const express = require('express');
 const cors = require('cors');
+const { quote } = require('yahoo-finance2/modules');
 const app = express();
 
 app.use(cors());
@@ -120,7 +121,7 @@ app.get('/api/candles/:ticker', async (request, response) => {
                 }
 
                 return {
-                    Timestamp: Math.floor(new Date(candle.date).getTime() / 1000),
+                    Timestamp: Math.floor(new Date(candle.date).setSeconds(0, 0) / 1000),
                     Open: open,
                     High: high,
                     Low: low,
@@ -130,6 +131,20 @@ app.get('/api/candles/:ticker', async (request, response) => {
             });   
     
         if (mode === 'live') {
+            try {
+                const liveQuote = await yahooFinance.quote(ticker);
+                if (liveQuote && liveQuote.regularMarketPrice && formattedData.length > 0) {
+                    const currentLivePrice = Number(liveQuote.regularMarketPrice);
+                    const lastIndex = formattedData.length - 1;
+
+                    formattedDate[lastIndex].Close = currentLivePrice;
+
+                    if (currentLivePrice > formattedData[lastIndex].High) formattedData[lastIndex].High = currentLivePrice;
+                    if (currentLivePrice < formattedData[lastIndex].Low) formattedData[lastIndex].Low = currentLivePrice;
+                } 
+            }  catch (quoteError) {
+                console.warn("Live tick override: ", quoteError.message);
+            }   
             response.json(formattedData.slice(-5));
         } else {
             response.json(formattedData);
