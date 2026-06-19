@@ -114,7 +114,8 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-const yahooFinance = require('yahoo-finance2').default;
+const YahooFinance = require('yahoo-finance2').default;
+const yahooFinance = new YahooFinance();
 
 app.get('/api/candles/:ticker', async (request, response) => {
     const ticker = request.params.ticker.toUpperCase();
