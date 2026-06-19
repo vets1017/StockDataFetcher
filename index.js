@@ -150,28 +150,31 @@ app.get('/api/candles/:ticker', async (request, response) => {
     try {
         console.log(`Fetching ${ticker} on ${interval}`);
 
-        const result = await yahooFinance.historical(ticker, {
+        const result = await yahooFinance.chart(ticker, {
             period1: period1,
             interval: interval
         });
 
-        if (!result || result.length === 0) {
+        if (!result || result.quotes || result.quotes.length === 0) {
             return response.status(404).json({ error: "No data found for this ticker."});
         }
 
-        const formattedData = result.map(candle => ({
-            Timestamp: Math.floor(candle.date.getTime() / 1000),
-            Open: candle.open,
-            High: candle.high,
-            Low: candle.low,
-            Close: candle.close,
-            Volume: candle.volume
-        }));
-        
+        const formattedData = result.quotes
+            .filter(candle => candle.open !== null && candle.close !== null)
+            .map(candle => ({
+                Timestamp: Math.floor(candle.date.getTime() / 1000),
+                Open: candle.open,
+                High: candle.high,
+                Low: candle.low,
+                Close: candle.close,
+                Volume: candle.Volume
+            }));    
+            
         response.json(formattedData);
+        
     } catch (error) {
         console.error("Yahoo Fetch Error:", error.message);
-        response.status(500).json({ error: "Yahoo Error" + error.message });
+        response.status(500).json({ error: "Yahoo Error: " + error.message });
     }
 });
 
