@@ -135,23 +135,23 @@ app.get('/api/candles/:ticker', async (request, response) => {
         return response.status(400).json({ error: "Invalid timeframe mapping"});
     }
 
-    const now = new Date();
-    
-    let period1 = new Date();
+    const nowInSeconds = Math.floor(Date.now() / 1000);
+    let startInSeconds;
 
     if (['1m', '5m', '30m'].includes(interval)) {
-        period1.setDate(now.getDate() - 5);
+        startInSeconds = nowInSeconds - (7 * 24 * 60 * 60);
     } else if (interval === '1h') {
-        period1.setDate(now.getDate() - 60);
+        startInSeconds = nowInSeconds - (60* 24 * 60 * 60);
     } else {
-        period1.setFullYear(now.getFullYear() - 2);
+        startInSeconds = nowInSeconds - (2 * 365 * 24 * 60 * 60);
     }
 
     try {
         console.log(`Fetching ${ticker} on ${interval}`);
 
         const result = await yahooFinance.chart(ticker, {
-            period1: period1,
+            period1: startInSeconds,
+            period2: nowInSeconds,
             interval: interval
         });
 
@@ -160,18 +160,18 @@ app.get('/api/candles/:ticker', async (request, response) => {
         }
 
         const formattedData = result.quotes
-            .filter(candle => candle.open !== null && candle.close !== null)
+            .filter(candle => candle && candle.date && candle.open !== null && candle.close !== null)
             .map(candle => ({
                 Timestamp: Math.floor(candle.date.getTime() / 1000),
                 Open: candle.open,
                 High: candle.high,
                 Low: candle.low,
                 Close: candle.close,
-                Volume: candle.Volume
+                Volume: candle.Volume || 0
             }));    
             
         response.json(formattedData);
-        
+
     } catch (error) {
         console.error("Yahoo Fetch Error:", error.message);
         response.status(500).json({ error: "Yahoo Error: " + error.message });
