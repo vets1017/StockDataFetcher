@@ -88,15 +88,31 @@ app.get('/api/candles/:ticker', async (request, response) => {
                 const close = Number(candle.close);
 
                 if (index > 0) {
-                    const prevClose = Number(array[index - 1].close);
-                    const maxAllowedDeviation = prevClose * 0.04;
+                    let baselinePrice = open;
+                    let sampleCount = 0;
+                    let priceSum = 0;
 
-                    if (high - prevClose > maxAllowedDeviation) {
-                        high = Math.max(open, close);
+                    if (index > 0 && array[index - 1]) {
+                        priceSum += Number(array[index - 1].close);
+                        sampleCount++;
                     }
 
-                    if (prevClose - low > maxAllowedDeviation) {
-                        low = Math.min(open, close);
+                    if (index < array.length - 1 && array[index + 1]) {
+                        priceSum += Number(array[index + 1].close);
+                        sampleCount++;
+                    }
+
+                    if (sampleCount > 0) {
+                        baselinePrice = priceSum / sampleCount;
+
+                        const maxAllowedDeviation = baselinePrice * 0.03;
+
+                        if (high - baselinePrice > maxAllowedDeviation) {
+                            high = Math.max(open, close);
+                        }
+                        if (baselinePrice - low > maxAllowedDeviation) {
+                            low = Math.min(open, close);
+                        }
                     }
                 }
 
