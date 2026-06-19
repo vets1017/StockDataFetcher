@@ -108,15 +108,12 @@
 // Testing YahooFinance
 
 const express = require('express');
-const axios = require('axios');
 const cors = require('cors');
-const fs = require('fs');
-const csv = require('csv-parser')
-const path = require('path')
-
 const app = express();
+
 app.use(cors());
 app.use(express.json());
+
 const yahooFinance = require('yahoo-finance2').default;
 
 app.get('/api/candles/:ticker', async (request, response) => {
@@ -150,7 +147,7 @@ app.get('/api/candles/:ticker', async (request, response) => {
     }
 
     try {
-        console.log('Fetching ${ticker} on ${interval}');
+        console.log(`Fetching ${ticker} on ${interval}`);
 
         const result = await yahooFinance.historical(ticker, {
             period1: period1,
@@ -162,11 +159,12 @@ app.get('/api/candles/:ticker', async (request, response) => {
         }
 
         const formattedData = result.map(candle => ({
-            Timestamp: Math.floor(candle.data.getTime() / 1000),
+            Timestamp: Math.floor(candle.date.getTime() / 1000),
             Open: candle.open,
-            High: candle.low,
+            High: candle.high,
+            Low: candle.low,
             Close: candle.close,
-            Volume: candle.Volume
+            Volume: candle.volume
         }));
         
         response.json(formattedData);
@@ -174,4 +172,10 @@ app.get('/api/candles/:ticker', async (request, response) => {
         console.error("Yahoo Fetch Error:", error.message);
         response.status(500).json({ error: "FAiled to fetch market data" });
     }
+});
+
+const PORT = process.env.PORT || 3000;
+
+app.listen(PORT, () => {
+    console.log(`Server running on port ${PORT}`);
 });
