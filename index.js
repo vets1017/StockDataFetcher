@@ -170,7 +170,7 @@ app.get('/api/candles/:ticker', async (request, response) => {
         response.json(formattedData);
     } catch (error) {
         console.error("Yahoo Fetch Error:", error.message);
-        response.status(500).json({ error: "FAiled to fetch market data" });
+        response.status(500).json({ error: "Yahoo Error" + error.message });
     }
 });
 
