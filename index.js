@@ -137,10 +137,14 @@ app.get('/api/candles/:ticker', async (request, response) => {
                     const currentLivePrice = Number(liveQuote.regularMarketPrice);
                     const lastIndex = formattedData.length - 1;
 
-                    formattedDate[lastIndex].Close = currentLivePrice;
+                    formattedData[lastIndex].Close = currentLivePrice;
 
-                    if (currentLivePrice > formattedData[lastIndex].High) formattedData[lastIndex].High = currentLivePrice;
-                    if (currentLivePrice < formattedData[lastIndex].Low) formattedData[lastIndex].Low = currentLivePrice;
+                    if (currentLivePrice > formattedData[lastIndex].High || formattedData[lastIndex].High === formattedData[lastIndex].Open) {
+                        formattedData[lastIndex].High = Math.max(formattedData[lastIndex].Open, currentLivePrice, formattedData[lastIndex].High);
+                    }
+                    if (currentLivePrice < formattedData[lastIndex].Low || formattedData[lastIndex].Low === formattedData[lastIndex].Open) {
+                        formattedData[lastIndex].Low = Math.min(formattedData[lastIndex].Open, currentLivePrice, formattedData[lastIndex].Low);
+                    }
                 } 
             }  catch (quoteError) {
                 console.warn("Live tick override: ", quoteError.message);
