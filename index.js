@@ -147,7 +147,7 @@ app.get('/api/candles/:ticker', async (request, response) => {
     }
 
     try {
-        console.log(`Fetching ${ticker} on ${interval}`);
+        console.log(`Sending request to Yahoo for Ticker: [${ticker}] with Interval: [${interval}]`);
 
         const result = await yahooFinance.chart(ticker, {
             period1: startInSeconds,
@@ -155,27 +155,55 @@ app.get('/api/candles/:ticker', async (request, response) => {
             interval: interval
         });
 
-        if (!result || result.quotes || result.quotes.length === 0) {
-            return response.status(404).json({ error: "No data found for this ticker."});
+        console.log("API Keys: ", Object.keys(result || {}));
+
+        let quotes = [];
+
+        if (result && result.quotes) {
+            quotes = result.quotes;
+        } else if (result && result.chart && result.chart.result && result.chart.result[0]) {
+            const rawData = result.chart.result[0];
+
+            if (rawData.timestamp && rawData.indicators && rawData.indicators.quote && rawData.indicators.quote[0]) {
+                const timestamps = rawData.timestamp;
+                const ohlc = rawData.indicators.quote[0]
+
+                quotes = timestamps.map((ts, index) => ({
+                    date: new Date(ts * 1000),
+                    open: ohlc.open ? ohlc.open[index] : null,
+                    high: ohlc.high ? ohlc.high[index] : null,
+                    low: ohlc.low ? ohlc.low[index] : null,
+                    close: ohlc.close ? ohlc.close[index] : null,
+                    volume: ohlc.volume ? ohlc.volume[index] : 0
+               }));
+            }
         }
 
-        const formattedData = result.quotes
-            .filter(candle => candle && candle.date && candle.open !== null && candle.close !== null)
-            .map(candle => ({
-                Timestamp: Math.floor(candle.date.getTime() / 1000),
-                Open: candle.open,
-                High: candle.high,
-                Low: candle.low,
-                Close: candle.close,
-                Volume: candle.Volume || 0
-            }));    
-            
-        response.json(formattedData);
+        if (!quotes || quotes.length === 0) {
+            console.warn(`Fallbacks failed for ${ticker}`);
+            return response.status(404).json({
+                error: `No data found for this ticker. Empty response for ${ticker} on ${interval}`
+            });
+        }
 
+        const formattedData = quotes
+            .filter(candle => candle && candle.open !== null && candle.close !== null)
+            .map(candle => ({
+                Timestamp: Math.floor(new Date(candle.date).getTime() / 1000),
+                Open: Number(candle.open),
+                High: Number(candle.high),
+                Low: Number(candle.low),
+                Close: Number(candle.close),
+                Volume: Number(candle.volume || 0)
+            }));
+        
+        console.log(`Success!`);
+
+        response.json(formattedData);
     } catch (error) {
-        console.error("Yahoo Fetch Error:", error.message);
-        response.status(500).json({ error: "Yahoo Error: " + error.message });
-    }
+        console.error("Yahoo: ", error.message);
+        response.status(500).json({error: "Yahoo: " + error.message});
+    }    
 });
 
 const PORT = process.env.PORT || 3000;
