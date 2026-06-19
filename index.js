@@ -30,20 +30,18 @@ app.get('/api/candles/:ticker', async (request, response) => {
         return response.status(400).json({ error: "Invalid timeframe mapping"});
     }
 
-    const nowInSeconds = Math.floor(Date.now() / 1000) + 120;
+    const nowInSeconds = Math.floor(Date.now() / 1000);
     let startInSeconds;
 
-    if (mode === 'live') {
-        startInSeconds = nowInSeconds - (60 * 60 * 2);
+    if (['1m', '5m', '30m'].includes(interval)) {
+        startInSeconds = nowInSeconds - (7 * 24 * 60 * 60);
+    } else if (interval === '1h') {
+        startInSeconds = nowInSeconds - (24 * 60 * 60 * 60);
     } else {
-        if (['1m', '5m', '30m'].includes(interval)) {
-            startInSeconds = nowInSeconds - (7 * 24 * 60 * 60);
-        } else if (interval === '1h') {
-            startInSeconds = nowInSeconds - (60* 24 * 60 * 60);
-        } else {
-            startInSeconds = nowInSeconds - (2 * 365 * 24 * 60 * 60);
-        }
-    }    
+        startInSeconds = nowInSeconds - (2 * 24 * 60 * 60 * 365);
+    }
+    
+   
 
     try {
         console.log(`Sending request to Yahoo for Ticker: [${ticker}] with Interval: [${interval}]`);
