@@ -107,6 +107,16 @@
 
 // Testing YahooFinance
 
+const express = require('express');
+const axios = require('axios');
+const cors = require('cors');
+const fs = require('fs');
+const csv = require('csv-parser')
+const path = require('path')
+
+const app = express();
+app.use(cors());
+app.use(express.json());
 const yahooFinance = require('yahoo-finance2').default;
 
 app.get('/api/candles/:ticker', async (request, response) => {
