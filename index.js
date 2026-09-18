@@ -223,6 +223,10 @@ app.get("/api/analyst/:ticker", async (request, response) => {
 
   if (!data) {
     console.error("Analyst report: ", error);
+    // If Yahoo has no data for this ticker, return available: false instead of error
+    if (error && error.toLowerCase().includes("no fundamentals data found")) {
+      return response.json({ available: false });
+    }
     return response.status(500).json({ error: "Yahoo " + error });
   }
 
