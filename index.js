@@ -214,6 +214,45 @@ app.get("/api/quote-details/:ticker", async (request, response) => {
   });
 });
 
+app.get("/api/analyst/:ticker", async (request, response) => {
+  const ticker = request.params.ticker.toUpperCase();
+  const { data, error } = await fetchQuoteSummary(ticker, [
+    "financialData",
+    "recommendationTrend",
+  ]);
+
+  if (!data) {
+    console.error("Analyst report: ", error);
+    return response.status(500).json({ error: "Yahoo " + error });
+  }
+
+  const financialData = data.financialData;
+  const trend =
+    data.recommendationTrend &&
+    data.recommendationTrend.trend &&
+    data.recommendationTrend.trend[0];
+
+  if (!financialData && !trend) {
+    return response.json({ available: false });
+  }
+
+  response.json({
+    available: true,
+    targetHigh: financialData?.targetHighPrice ?? null,
+    targetLow: financialData?.targetLowPrice ?? null,
+    targetMean: financialData?.targetMeanPrice ?? null,
+    targetMedian: financialData?.targetMedianPrice ?? null,
+    recommendationMean: financialData?.recommendationMean ?? null,
+    recommendationKey: financialData?.recommendationKey ?? null,
+    numberOfAnalysts: financialData?.numberOfAnalystOpinions ?? null,
+    strongBuyCount: trend?.strongBuy ?? null,
+    buyCount: trend?.buy ?? null,
+    holdCount: trend?.hold ?? null,
+    sellCount: trend?.sell ?? null,
+    strongSellCount: trend?.strongSell ?? null,
+  });
+});
+
 const PORT = process.env.PORT || 3000;
 
 app.listen(PORT, () => {
