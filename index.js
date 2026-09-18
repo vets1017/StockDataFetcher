@@ -257,6 +257,51 @@ app.get("/api/analyst/:ticker", async (request, response) => {
   });
 });
 
+app.get("/api/fundamentals/:ticker", async (request, response) => {
+  const ticker = request.params.ticker.toUpperCase();
+  const { data, error } = await fetchQuoteSummary(ticker, [
+    "financialData",
+    "defaultKeyStatistics",
+    "summaryDetail",
+  ]);
+
+  if (!data) {
+    console.error("Fundamentals: ", error);
+    if (error && error.toLowerCase().includes("no fundamentals data found")) {
+      return response.json({ available: false });
+    }
+    return response.status(500).json({ error: "Yahoo " + error });
+  }
+
+  const financialData = data.financialData;
+  const keyStats = data.defaultKeyStatistics;
+
+  if (!financialData && !keyStats) {
+    return response.json({ available: false });
+  }
+
+  const pct = (value) => (typeof value === "number" ? value * 100 : null);
+
+  response.json({
+    available: true,
+    totalRevenue: financialData?.totalRevenue ?? null,
+    grossMargins: pct(financialData?.grossMargins),
+    operatingMargins: pct(financialData?.operatingMargins),
+    profitMargins: pct(financialData?.profitMargins),
+    returnOnEquity: pct(financialData?.returnOnEquity),
+    returnOnAssets: pct(financialData?.returnOnAssets),
+    totalCash: financialData?.totalCash ?? null,
+    totalDebt: financialData?.totalDebt ?? null,
+    debtToEquity: financialData?.debtToEquity ?? null,
+    freeCashflow: financialData?.freeCashflow ?? null,
+    priceToBook: keyStats?.priceToBook ?? null,
+    pegRatio: keyStats?.pegRatio ?? null,
+    enterpriseToEbitda: keyStats?.enterpriseToEbitda ?? null,
+    revenueGrowth: pct(financialData?.revenueGrowth),
+    earningsGrowth: pct(financialData?.earningsGrowth),
+  });
+});
+
 const PORT = process.env.PORT || 3000;
 
 app.listen(PORT, () => {
