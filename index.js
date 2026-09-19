@@ -302,6 +302,62 @@ app.get("/api/fundamentals/:ticker", async (request, response) => {
   });
 });
 
+app.get("/api/options/:ticker", async (request, response) => {
+  const ticker = request.params.ticker.toUpperCase();
+
+  try {
+    const result = await yahooFinance.options(ticker);
+    const chain = result.options && result.options[0];
+    const spotPrice = result.quote?.regularMarketPrice ?? null;
+
+    if (!chain || !chain.calls || chain.calls.length === 0 || spotPrice === null) {
+      return response.json({ available: false });
+    }
+
+    const calls = chain.calls;
+    const puts = chain.puts || [];
+
+    let atmCall = calls[0];
+    let smallestDiff = Math.abs(calls[0].strike - spotPrice);
+
+    for (const call of calls) {
+      const diff = Math.abs(call.strike - spotPrice);
+      if (diff < smallestDiff) {
+        smallestDiff = diff;
+        atmCall = call;
+      }
+    }
+
+    const atmPut = puts.find((put) => put.strike === atmCall.strike) || null;
+
+    const pickFields = (contract) =>
+      contract
+        ? {
+            bid: contract.bid ?? null,
+            ask: contract.ask ?? null,
+            lastPrice: contract.lastPrice ?? null,
+            impliedVolatility:
+              typeof contract.impliedVolatility === "number"
+                ? contract.impliedVolatility * 100
+                : null,
+            volume: contract.volume ?? null,
+            openInterest: contract.openInterest ?? null,
+          }
+        : null;
+
+    response.json({
+      available: true,
+      expiration: chain.expirationDate ?? null,
+      strike: atmCall.strike,
+      call: pickFields(atmCall),
+      put: pickFields(atmPut),
+    });
+  } catch (error) {
+    console.error("Options: ", error.message);
+    response.status(500).json({ error: "Yahoo " + error.message });
+  }
+});
+
 const PORT = process.env.PORT || 3000;
 
 app.listen(PORT, () => {
