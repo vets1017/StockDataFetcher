@@ -395,6 +395,63 @@ app.get("/api/options/:ticker", async (request, response) => {
   }
 });
 
+app.get("/api/option-chain/:ticker", async (request, response) => {
+  const ticker = request.params.ticker.toUpperCase();
+
+  try {
+    const result = await yahooFinance.options(ticker);
+    const chain = result.options && result.options[0];
+    const spotPrice = result.quote?.regularMarketPrice ?? null;
+
+    if (!chain || !chain.calls || chain.calls.length === 0 || spotPrice === null) {
+      return response.json({ available: false });
+    }
+
+    const STRIKE_RANGE_PCT = 0.20; // keep payload focused/small for a Roblox client
+    const minStrike = spotPrice * (1 - STRIKE_RANGE_PCT);
+    const maxStrike = spotPrice * (1 + STRIKE_RANGE_PCT);
+
+    const pickFields = (contract) =>
+      contract
+        ? {
+            contractSymbol: contract.contractSymbol,
+            bid: contract.bid ?? null,
+            ask: contract.ask ?? null,
+            lastPrice: contract.lastPrice ?? null,
+            impliedVolatility:
+              typeof contract.impliedVolatility === "number"
+                ? contract.impliedVolatility * 100
+                : null,
+            volume: contract.volume ?? null,
+            openInterest: contract.openInterest ?? null,
+          }
+        : null;
+
+    const callsByStrike = new Map(
+      chain.calls.filter((c) => c.strike >= minStrike && c.strike <= maxStrike).map((c) => [c.strike, c]),
+    );
+    const putsByStrike = new Map(
+      (chain.puts || []).filter((p) => p.strike >= minStrike && p.strike <= maxStrike).map((p) => [p.strike, p]),
+    );
+    const allStrikes = [...new Set([...callsByStrike.keys(), ...putsByStrike.keys()])].sort((a, b) => a - b);
+
+    response.json({
+      available: true,
+      spotPrice,
+      expiration: chain.expirationDate ?? null,
+      expirationDates: result.expirationDates ?? [],
+      strikes: allStrikes.map((strike) => ({
+        strike,
+        call: pickFields(callsByStrike.get(strike)),
+        put: pickFields(putsByStrike.get(strike)),
+      })),
+    });
+  } catch (error) {
+    console.error("Option chain: ", error.message);
+    response.status(500).json({ error: "Yahoo " + error.message });
+  }
+});
+
 const PORT = process.env.PORT || 3000;
 
 app.listen(PORT, () => {
