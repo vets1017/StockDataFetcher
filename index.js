@@ -403,11 +403,16 @@ app.get("/api/option-chain/:ticker", async (request, response) => {
     const chain = result.options && result.options[0];
     const spotPrice = result.quote?.regularMarketPrice ?? null;
 
-    if (!chain || !chain.calls || chain.calls.length === 0 || spotPrice === null) {
+    if (
+      !chain ||
+      !chain.calls ||
+      chain.calls.length === 0 ||
+      spotPrice === null
+    ) {
       return response.json({ available: false });
     }
 
-    const STRIKE_RANGE_PCT = 0.20; // keep payload focused/small for a Roblox client
+    const STRIKE_RANGE_PCT = 0.2; // keep payload focused/small for a Roblox client
     const minStrike = spotPrice * (1 - STRIKE_RANGE_PCT);
     const maxStrike = spotPrice * (1 + STRIKE_RANGE_PCT);
 
@@ -428,12 +433,18 @@ app.get("/api/option-chain/:ticker", async (request, response) => {
         : null;
 
     const callsByStrike = new Map(
-      chain.calls.filter((c) => c.strike >= minStrike && c.strike <= maxStrike).map((c) => [c.strike, c]),
+      chain.calls
+        .filter((c) => c.strike >= minStrike && c.strike <= maxStrike)
+        .map((c) => [c.strike, c]),
     );
     const putsByStrike = new Map(
-      (chain.puts || []).filter((p) => p.strike >= minStrike && p.strike <= maxStrike).map((p) => [p.strike, p]),
+      (chain.puts || [])
+        .filter((p) => p.strike >= minStrike && p.strike <= maxStrike)
+        .map((p) => [p.strike, p]),
     );
-    const allStrikes = [...new Set([...callsByStrike.keys(), ...putsByStrike.keys()])].sort((a, b) => a - b);
+    const allStrikes = [
+      ...new Set([...callsByStrike.keys(), ...putsByStrike.keys()]),
+    ].sort((a, b) => a - b);
 
     response.json({
       available: true,
