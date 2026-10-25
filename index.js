@@ -463,6 +463,164 @@ app.get("/api/option-chain/:ticker", async (request, response) => {
   }
 });
 
+// Every game server asks for the same news, movers and sectors, so these
+// routes share results through a small in-memory cache instead of each
+// request becoming a Yahoo call (Yahoo answers bursts with 429s).
+const responseCache = new Map(); // key -> { expiresAt, value }
+const pendingFetches = new Map(); // key -> promise, so a burst of misses makes one call
+const CACHE_SWEEP_MS = 10 * 60 * 1000;
+
+function cached(key, ttlMs, fetchValue) {
+  const hit = responseCache.get(key);
+
+  if (hit && hit.expiresAt > Date.now()) {
+    return Promise.resolve(hit.value);
+  }
+
+  if (pendingFetches.has(key)) {
+    return pendingFetches.get(key);
+  }
+
+  // A failed fetch isn't cached, so the next request tries again
+  const fetch = fetchValue()
+    .then((value) => {
+      responseCache.set(key, { expiresAt: Date.now() + ttlMs, value });
+
+      return value;
+    })
+    .finally(() => pendingFetches.delete(key));
+
+  pendingFetches.set(key, fetch);
+
+  return fetch;
+}
+
+setInterval(() => {
+  const now = Date.now();
+
+  for (const [key, entry] of responseCache) {
+    if (entry.expiresAt <= now) {
+      responseCache.delete(key);
+    }
+  }
+}, CACHE_SWEEP_MS);
+
+// Same rule the game uses for tickers (letters, digits, "." and "-")
+function isValidTicker(ticker) {
+  return /^[A-Z0-9.\-]{1,10}$/.test(ticker);
+}
+
+const NEWS_TTL_MS = 10 * 60 * 1000;
+const MOVERS_TTL_MS = 2 * 60 * 1000;
+const PROFILE_TTL_MS = 24 * 60 * 60 * 1000;
+const NEWS_COUNT = 10;
+const MOVERS_COUNT = 10;
+
+// Recent headlines mentioning a ticker
+app.get("/api/news/:ticker", async (request, response) => {
+  const ticker = request.params.ticker.toUpperCase();
+
+  if (!isValidTicker(ticker)) {
+    return response.status(400).json({ error: "Invalid ticker" });
+  }
+
+  try {
+    const items = await cached(`news:${ticker}`, NEWS_TTL_MS, async () => {
+      const result = await yahooFinance.search(ticker, {
+        newsCount: NEWS_COUNT,
+        quotesCount: 0,
+      });
+
+      return (result.news || []).map((article) => ({
+        title: article.title,
+        publisher: article.publisher ?? null,
+        link: article.link ?? null,
+        publishedAt: article.providerPublishTime
+          ? Math.floor(new Date(article.providerPublishTime).getTime() / 1000)
+          : null,
+        relatedTickers: article.relatedTickers ?? [],
+      }));
+    });
+
+    response.json({ available: items.length > 0, items });
+  } catch (error) {
+    console.error("News: ", error);
+    response.status(500).json({ error: "Yahoo " + error.message });
+  }
+});
+
+// Today's biggest gainers and losers and the most traded US stocks.
+// Yahoo's screener response has drifted from yahoo-finance2's schema, so
+// validation is skipped and only the fields used here are read.
+app.get("/api/movers", async (request, response) => {
+  try {
+    const movers = await cached("movers", MOVERS_TTL_MS, async () => {
+      const fetchScreener = async (scrIds) => {
+        const result = await yahooFinance.screener(
+          { scrIds, count: MOVERS_COUNT },
+          undefined,
+          { validateResult: false },
+        );
+
+        return (result.quotes || [])
+          .filter((quote) => quote.symbol && quote.regularMarketPrice)
+          .map((quote) => ({
+            symbol: quote.symbol,
+            name: quote.shortName || quote.longName || quote.symbol,
+            price: quote.regularMarketPrice,
+            change: quote.regularMarketChange ?? null,
+            changePercent: quote.regularMarketChangePercent ?? null,
+            volume: quote.regularMarketVolume ?? null,
+          }));
+      };
+
+      const [gainers, losers, active] = await Promise.all([
+        fetchScreener("day_gainers"),
+        fetchScreener("day_losers"),
+        fetchScreener("most_actives"),
+      ]);
+
+      return { gainers, losers, active };
+    });
+
+    response.json(movers);
+  } catch (error) {
+    console.error("Movers: ", error);
+    response.status(500).json({ error: "Yahoo " + error.message });
+  }
+});
+
+// What kind of security a ticker is, and its sector and industry for
+// stocks (ETFs, crypto and others have none)
+app.get("/api/profile/:ticker", async (request, response) => {
+  const ticker = request.params.ticker.toUpperCase();
+
+  if (!isValidTicker(ticker)) {
+    return response.status(400).json({ error: "Invalid ticker" });
+  }
+
+  try {
+    const profile = await cached(`profile:${ticker}`, PROFILE_TTL_MS, async () => {
+      const result = await yahooFinance.quoteSummary(
+        ticker,
+        { modules: ["assetProfile", "quoteType"] },
+        { validateResult: false },
+      );
+
+      return {
+        quoteType: result.quoteType?.quoteType ?? null,
+        sector: result.assetProfile?.sector ?? null,
+        industry: result.assetProfile?.industry ?? null,
+      };
+    });
+
+    response.json(profile);
+  } catch (error) {
+    console.error("Profile: ", error);
+    response.status(500).json({ error: "Yahoo " + error.message });
+  }
+});
+
 const PORT = process.env.PORT || 3000;
 
 app.listen(PORT, () => {
