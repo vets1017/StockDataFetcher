@@ -11,13 +11,115 @@ app.use(express.json());
 const YahooFinance = require("yahoo-finance2").default;
 const yahooFinance = new YahooFinance();
 
-async function fetchQuoteSummary(ticker, modules) {
+// Every game server asks Yahoo for the same symbols, so all routes share
+// results through a small in-memory cache instead of each request becoming a
+// Yahoo call (Yahoo answers bursts with 429s).
+const responseCache = new Map(); // key -> { expiresAt, value }
+const pendingFetches = new Map(); // key -> promise, so a burst of misses makes one call
+const CACHE_SWEEP_MS = 10 * 60 * 1000;
+
+function cached(key, ttlMs, fetchValue) {
+  const hit = responseCache.get(key);
+
+  if (hit && hit.expiresAt > Date.now()) {
+    return Promise.resolve(hit.value);
+  }
+
+  if (pendingFetches.has(key)) {
+    return pendingFetches.get(key);
+  }
+
+  // A failed fetch isn't cached, so the next request tries again
+  const fetch = fetchValue()
+    .then((value) => {
+      responseCache.set(key, { expiresAt: Date.now() + ttlMs, value });
+
+      return value;
+    })
+    .finally(() => pendingFetches.delete(key));
+
+  pendingFetches.set(key, fetch);
+
+  return fetch;
+}
+
+setInterval(() => {
+  const now = Date.now();
+
+  for (const [key, entry] of responseCache) {
+    if (entry.expiresAt <= now) {
+      responseCache.delete(key);
+    }
+  }
+}, CACHE_SWEEP_MS);
+
+// Same rule the game uses for tickers (letters, digits, "." and "-")
+function isValidTicker(ticker) {
+  return /^[A-Z0-9.\-]{1,10}$/.test(ticker);
+}
+
+const QUOTE_TTL_MS = 10 * 1000; // a "live" price is at most this old
+const OPTIONS_TTL_MS = 5 * 60 * 1000;
+const QUOTE_DETAILS_TTL_MS = 60 * 1000;
+const RESEARCH_TTL_MS = 6 * 60 * 60 * 1000; // analyst and fundamentals
+const CHART_TTL_MS = {
+  "1m": 60 * 1000,
+  "5m": 60 * 1000,
+  "30m": 5 * 60 * 1000,
+  "1h": 5 * 60 * 1000,
+  "1d": 60 * 60 * 1000,
+};
+
+async function fetchQuoteSummary(ticker, modules, ttlMs) {
   try {
-    const result = await yahooFinance.quoteSummary(ticker, { modules });
+    const result = await cached(`summary:${ticker}:${modules.join(",")}`, ttlMs, () =>
+      yahooFinance.quoteSummary(ticker, { modules }),
+    );
     return { data: result, error: null };
   } catch (error) {
     return { data: null, error: error.message };
   }
+}
+
+// Yahoo quotes for many symbols, keyed by symbol. Symbols cached within
+// QUOTE_TTL_MS are reused and the rest are fetched in one request; a
+// symbol Yahoo doesn't know is just missing from the result.
+async function getQuotes(symbols) {
+  const now = Date.now();
+  const missing = symbols.filter((symbol) => {
+    const hit = responseCache.get(`quote:${symbol}`);
+
+    return !(hit && hit.expiresAt > now);
+  });
+
+  if (missing.length > 0) {
+    const results = await yahooFinance.quote(missing, {}, { validateResult: false });
+
+    for (const quote of [].concat(results || [])) {
+      if (quote && quote.symbol) {
+        responseCache.set(`quote:${quote.symbol}`, {
+          expiresAt: Date.now() + QUOTE_TTL_MS,
+          value: quote,
+        });
+      }
+    }
+  }
+
+  const quotes = {};
+
+  for (const symbol of symbols) {
+    const hit = responseCache.get(`quote:${symbol}`);
+
+    if (hit) {
+      quotes[symbol] = hit.value;
+    }
+  }
+
+  return quotes;
+}
+
+function getOptions(ticker) {
+  return cached(`options:${ticker}`, OPTIONS_TTL_MS, () => yahooFinance.options(ticker));
 }
 
 app.get("/api/candles/:ticker", async (request, response) => {
@@ -55,11 +157,13 @@ app.get("/api/candles/:ticker", async (request, response) => {
       `Sending request to Yahoo for Ticker: [${ticker}] with Interval: [${interval}]`,
     );
 
-    const result = await yahooFinance.chart(ticker, {
-      period1: startInSeconds,
-      period2: nowInSeconds,
-      interval: interval,
-    });
+    const result = await cached(`chart:${ticker}:${interval}`, CHART_TTL_MS[interval], () =>
+      yahooFinance.chart(ticker, {
+        period1: startInSeconds,
+        period2: nowInSeconds,
+        interval: interval,
+      }),
+    );
 
     console.log("API Keys: ", Object.keys(result || {}));
 
@@ -151,7 +255,7 @@ app.get("/api/candles/:ticker", async (request, response) => {
 
     if (mode === "live") {
       try {
-        const liveQuote = await yahooFinance.quote(ticker);
+        const liveQuote = (await getQuotes([ticker]))[ticker];
         if (
           liveQuote &&
           liveQuote.regularMarketPrice &&
@@ -198,12 +302,11 @@ app.get("/api/candles/:ticker", async (request, response) => {
 
 app.get("/api/quote-details/:ticker", async (request, response) => {
   const ticker = request.params.ticker.toUpperCase();
-  const { data, error } = await fetchQuoteSummary(ticker, [
-    "summaryDetail",
-    "defaultKeyStatistics",
-    "calendarEvents",
-    "price",
-  ]);
+  const { data, error } = await fetchQuoteSummary(
+    ticker,
+    ["summaryDetail", "defaultKeyStatistics", "calendarEvents", "price"],
+    QUOTE_DETAILS_TTL_MS,
+  );
 
   if (!data) {
     console.error("Quote details: ", error);
@@ -248,10 +351,11 @@ app.get("/api/quote-details/:ticker", async (request, response) => {
 
 app.get("/api/analyst/:ticker", async (request, response) => {
   const ticker = request.params.ticker.toUpperCase();
-  const { data, error } = await fetchQuoteSummary(ticker, [
-    "financialData",
-    "recommendationTrend",
-  ]);
+  const { data, error } = await fetchQuoteSummary(
+    ticker,
+    ["financialData", "recommendationTrend"],
+    RESEARCH_TTL_MS,
+  );
 
   if (!data) {
     console.error("Analyst report: ", error);
@@ -291,11 +395,11 @@ app.get("/api/analyst/:ticker", async (request, response) => {
 
 app.get("/api/fundamentals/:ticker", async (request, response) => {
   const ticker = request.params.ticker.toUpperCase();
-  const { data, error } = await fetchQuoteSummary(ticker, [
-    "financialData",
-    "defaultKeyStatistics",
-    "summaryDetail",
-  ]);
+  const { data, error } = await fetchQuoteSummary(
+    ticker,
+    ["financialData", "defaultKeyStatistics", "summaryDetail"],
+    RESEARCH_TTL_MS,
+  );
 
   if (!data) {
     console.error("Fundamentals: ", error);
@@ -338,7 +442,7 @@ app.get("/api/options/:ticker", async (request, response) => {
   const ticker = request.params.ticker.toUpperCase();
 
   try {
-    const result = await yahooFinance.options(ticker);
+    const result = await getOptions(ticker);
     const chain = result.options && result.options[0];
     const spotPrice = result.quote?.regularMarketPrice ?? null;
 
@@ -399,7 +503,7 @@ app.get("/api/option-chain/:ticker", async (request, response) => {
   const ticker = request.params.ticker.toUpperCase();
 
   try {
-    const result = await yahooFinance.options(ticker);
+    const result = await getOptions(ticker);
     const chain = result.options && result.options[0];
     const spotPrice = result.quote?.regularMarketPrice ?? null;
 
@@ -463,52 +567,6 @@ app.get("/api/option-chain/:ticker", async (request, response) => {
   }
 });
 
-// Every game server asks for the same news, movers and sectors, so these
-// routes share results through a small in-memory cache instead of each
-// request becoming a Yahoo call (Yahoo answers bursts with 429s).
-const responseCache = new Map(); // key -> { expiresAt, value }
-const pendingFetches = new Map(); // key -> promise, so a burst of misses makes one call
-const CACHE_SWEEP_MS = 10 * 60 * 1000;
-
-function cached(key, ttlMs, fetchValue) {
-  const hit = responseCache.get(key);
-
-  if (hit && hit.expiresAt > Date.now()) {
-    return Promise.resolve(hit.value);
-  }
-
-  if (pendingFetches.has(key)) {
-    return pendingFetches.get(key);
-  }
-
-  // A failed fetch isn't cached, so the next request tries again
-  const fetch = fetchValue()
-    .then((value) => {
-      responseCache.set(key, { expiresAt: Date.now() + ttlMs, value });
-
-      return value;
-    })
-    .finally(() => pendingFetches.delete(key));
-
-  pendingFetches.set(key, fetch);
-
-  return fetch;
-}
-
-setInterval(() => {
-  const now = Date.now();
-
-  for (const [key, entry] of responseCache) {
-    if (entry.expiresAt <= now) {
-      responseCache.delete(key);
-    }
-  }
-}, CACHE_SWEEP_MS);
-
-// Same rule the game uses for tickers (letters, digits, "." and "-")
-function isValidTicker(ticker) {
-  return /^[A-Z0-9.\-]{1,10}$/.test(ticker);
-}
 
 const NEWS_TTL_MS = 10 * 60 * 1000;
 const MOVERS_TTL_MS = 2 * 60 * 1000;
@@ -617,6 +675,84 @@ app.get("/api/profile/:ticker", async (request, response) => {
     response.json(profile);
   } catch (error) {
     console.error("Profile: ", error);
+    response.status(500).json({ error: "Yahoo " + error.message });
+  }
+});
+
+const MAX_BATCH_SYMBOLS = 50;
+const SPLITS_TTL_MS = 12 * 60 * 60 * 1000;
+const SPLITS_LOOKBACK_SECONDS = 2 * 365 * 24 * 60 * 60;
+
+// Several symbols in one call: ?symbols=AAPL,MSFT,BTC-USD. Returns
+// { [symbol]: { price, bid, ask, prevClose, time, marketState } }; bid and
+// ask are null when Yahoo has none (crypto, or outside market hours).
+app.get("/api/quotes", async (request, response) => {
+  const symbols = String(request.query.symbols || "")
+    .toUpperCase()
+    .split(",")
+    .filter((symbol) => symbol !== "");
+
+  if (
+    symbols.length === 0 ||
+    symbols.length > MAX_BATCH_SYMBOLS ||
+    !symbols.every(isValidTicker)
+  ) {
+    return response.status(400).json({ error: "Invalid symbols" });
+  }
+
+  try {
+    const quotes = await getQuotes([...new Set(symbols)]);
+    const result = {};
+
+    for (const [symbol, quote] of Object.entries(quotes)) {
+      result[symbol] = {
+        price: quote.regularMarketPrice ?? null,
+        bid: quote.bid || null,
+        ask: quote.ask || null,
+        prevClose: quote.regularMarketPreviousClose ?? null,
+        time: quote.regularMarketTime
+          ? Math.floor(new Date(quote.regularMarketTime).getTime() / 1000)
+          : null,
+        marketState: quote.marketState ?? null,
+      };
+    }
+
+    response.json(result);
+  } catch (error) {
+    console.error("Quotes: ", error);
+    response.status(500).json({ error: "Yahoo " + error.message });
+  }
+});
+
+// Stock splits over the last two years: { splits: [{ date, numerator,
+// denominator }] }, dates as unix seconds. 4-for-1 is numerator 4.
+app.get("/api/splits/:ticker", async (request, response) => {
+  const ticker = request.params.ticker.toUpperCase();
+
+  if (!isValidTicker(ticker)) {
+    return response.status(400).json({ error: "Invalid ticker" });
+  }
+
+  try {
+    const splits = await cached(`splits:${ticker}`, SPLITS_TTL_MS, async () => {
+      const nowInSeconds = Math.floor(Date.now() / 1000);
+      const result = await yahooFinance.chart(ticker, {
+        period1: nowInSeconds - SPLITS_LOOKBACK_SECONDS,
+        period2: nowInSeconds,
+        interval: "1d",
+        events: "split",
+      });
+
+      return ((result.events && result.events.splits) || []).map((split) => ({
+        date: Math.floor(new Date(split.date).getTime() / 1000),
+        numerator: split.numerator,
+        denominator: split.denominator,
+      }));
+    });
+
+    response.json({ splits });
+  } catch (error) {
+    console.error("Splits: ", error);
     response.status(500).json({ error: "Yahoo " + error.message });
   }
 });
