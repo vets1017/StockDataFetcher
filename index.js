@@ -914,6 +914,63 @@ app.get("/api/splits/:ticker", async (request, response) => {
   }
 });
 
+const axios = require("axios");
+
+const ROBLOX_STATS_TTL_MS = 4 * 60 * 1000; // just under the game's five-minute tick
+const MAX_ROBLOX_EXPERIENCES = 50; // Roblox's batch limit for these routes
+const ROBLOX_TIMEOUT_MS = 10 * 1000;
+
+// Public stats of Roblox experiences for the game's simulated Roblox market.
+// Game servers can't call roblox.com, so the backend fetches them:
+// ?ids=383310974,1686885941 (universe ids) returns { [universeId]: { name,
+// creator, playing, visits, favorites, upVotes, downVotes, created, updated,
+// genre } }, times as unix seconds. An id Roblox doesn't return is missing.
+app.get("/api/roblox/experiences", async (request, response) => {
+  const ids = [...new Set(String(request.query.ids || "").split(",").filter((id) => id !== ""))];
+
+  if (ids.length === 0 || ids.length > MAX_ROBLOX_EXPERIENCES || !ids.every((id) => /^\d{1,15}$/.test(id))) {
+    return response.status(400).json({ error: "Invalid ids" });
+  }
+
+  const list = ids.sort().join(",");
+
+  try {
+    const stats = await cached(`roblox:${list}`, ROBLOX_STATS_TTL_MS, async () => {
+      const [games, votes] = await Promise.all([
+        axios.get(`https://games.roblox.com/v1/games?universeIds=${list}`, { timeout: ROBLOX_TIMEOUT_MS }),
+        axios.get(`https://games.roblox.com/v1/games/votes?universeIds=${list}`, { timeout: ROBLOX_TIMEOUT_MS }),
+      ]);
+      const votesById = new Map((votes.data.data || []).map((entry) => [entry.id, entry]));
+      const toSeconds = (date) => (date ? Math.floor(new Date(date).getTime() / 1000) : null);
+      const result = {};
+
+      for (const game of games.data.data || []) {
+        const vote = votesById.get(game.id) || {};
+
+        result[game.id] = {
+          name: game.name,
+          creator: game.creator ? game.creator.name : null,
+          playing: game.playing ?? 0,
+          visits: game.visits ?? 0,
+          favorites: game.favoritedCount ?? 0,
+          upVotes: vote.upVotes ?? null,
+          downVotes: vote.downVotes ?? null,
+          created: toSeconds(game.created),
+          updated: toSeconds(game.updated),
+          genre: game.genre_l1 || game.genre || null,
+        };
+      }
+
+      return result;
+    });
+
+    response.json(stats);
+  } catch (error) {
+    console.error("Roblox experiences: ", error.message);
+    response.status(500).json({ error: "Roblox " + error.message });
+  }
+});
+
 const PORT = process.env.PORT || 3000;
 
 app.listen(PORT, () => {
