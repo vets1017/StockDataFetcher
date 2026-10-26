@@ -9,7 +9,7 @@ app.use(cors());
 app.use(express.json());
 
 const YahooFinance = require("yahoo-finance2").default;
-const yahooFinance = new YahooFinance();
+const yahooFinance = new YahooFinance({ suppressNotices: ["yahooSurvey"] });
 
 // Every game server asks Yahoo for the same symbols, so all routes share
 // results through a small in-memory cache instead of each request becoming a
@@ -17,6 +17,10 @@ const yahooFinance = new YahooFinance();
 const responseCache = new Map(); // key -> { expiresAt, value }
 const pendingFetches = new Map(); // key -> promise, so a burst of misses makes one call
 const CACHE_SWEEP_MS = 10 * 60 * 1000;
+// An expired entry is kept this long past its expiry, to answer with while
+// Yahoo is failing: slightly old data beats an error (the game checks a
+// quote's own time before filling at it)
+const STALE_MAX_MS = 6 * 60 * 60 * 1000;
 
 function cached(key, ttlMs, fetchValue) {
   const hit = responseCache.get(key);
@@ -36,6 +40,15 @@ function cached(key, ttlMs, fetchValue) {
 
       return value;
     })
+    .catch((error) => {
+      if (hit) {
+        console.warn(`Serving stale ${key}: ${error.message}`);
+
+        return hit.value;
+      }
+
+      throw error;
+    })
     .finally(() => pendingFetches.delete(key));
 
   pendingFetches.set(key, fetch);
@@ -47,11 +60,54 @@ setInterval(() => {
   const now = Date.now();
 
   for (const [key, entry] of responseCache) {
-    if (entry.expiresAt <= now) {
+    if (entry.expiresAt + STALE_MAX_MS <= now) {
       responseCache.delete(key);
     }
   }
 }, CACHE_SWEEP_MS);
+
+// Yahoo's quote, quoteSummary, options and screener calls need a "crumb"
+// token first, and Yahoo refuses crumbs (429) to IPs it distrusts, which
+// shared cloud IPs like Render's often are. yahoo-finance2 asks for a new
+// crumb on every call after a refusal, so a busy game kept the block going.
+// After a refusal, crumb calls pause - a minute at first, doubling to 15
+// minutes while Yahoo keeps refusing - and routes answer from stale data or
+// the chart endpoint, which needs no crumb.
+const CRUMB_PAUSE_MIN_MS = 60 * 1000;
+const CRUMB_PAUSE_MAX_MS = 15 * 60 * 1000;
+const crumbPause = { until: 0, lengthMs: 0, lastError: null };
+
+function isCrumbRefusal(error) {
+  return /crumb|429|too many requests/i.test(String(error && error.message));
+}
+
+async function withCrumb(call) {
+  if (Date.now() < crumbPause.until) {
+    throw new Error("Yahoo is refusing crumbs; crumb calls are paused");
+  }
+
+  try {
+    const value = await call();
+
+    crumbPause.lengthMs = 0;
+
+    return value;
+  } catch (error) {
+    // Calls already in flight when a pause starts fail too; only the first
+    // refusal lengthens it
+    if (isCrumbRefusal(error) && Date.now() >= crumbPause.until) {
+      crumbPause.lengthMs = Math.min(
+        Math.max(crumbPause.lengthMs * 2, CRUMB_PAUSE_MIN_MS),
+        CRUMB_PAUSE_MAX_MS,
+      );
+      crumbPause.until = Date.now() + crumbPause.lengthMs;
+      crumbPause.lastError = error.message;
+      console.warn(`Crumb refused (${error.message}); pausing crumb calls for ${crumbPause.lengthMs / 1000}s`);
+    }
+
+    throw error;
+  }
+}
 
 // Same rule the game uses for tickers (letters, digits, "." and "-")
 function isValidTicker(ticker) {
@@ -73,7 +129,7 @@ const CHART_TTL_MS = {
 async function fetchQuoteSummary(ticker, modules, ttlMs) {
   try {
     const result = await cached(`summary:${ticker}:${modules.join(",")}`, ttlMs, () =>
-      yahooFinance.quoteSummary(ticker, { modules }),
+      withCrumb(() => yahooFinance.quoteSummary(ticker, { modules })),
     );
     return { data: result, error: null };
   } catch (error) {
@@ -81,8 +137,93 @@ async function fetchQuoteSummary(ticker, modules, ttlMs) {
   }
 }
 
+const CHART_QUOTE_CONCURRENCY = 4;
+const CHART_QUOTE_LOOKBACK_SECONDS = 7 * 24 * 60 * 60;
+
+// "REGULAR", "PRE", "POST" or "CLOSED" at `now`, from the session windows a
+// chart reports (the quote endpoint's marketState, which needs a crumb)
+function marketStateFrom(periods, now) {
+  const isWithin = (period) =>
+    period && now >= new Date(period.start).getTime() && now < new Date(period.end).getTime();
+
+  if (!periods) {
+    return null;
+  } else if (isWithin(periods.regular)) {
+    return "REGULAR";
+  } else if (isWithin(periods.pre)) {
+    return "PRE";
+  } else if (isWithin(periods.post)) {
+    return "POST";
+  }
+
+  return "CLOSED";
+}
+
+// A quote built from the chart endpoint, which needs no crumb, in the quote
+// endpoint's shape. No bid or ask (the game then fills at the last price).
+// The previous close is the daily bar before the latest session; for crypto
+// that's the previous UTC day's close, which can differ a little from the
+// quote endpoint's.
+async function getChartQuote(symbol) {
+  const nowInSeconds = Math.floor(Date.now() / 1000);
+  const result = await yahooFinance.chart(symbol, {
+    period1: nowInSeconds - CHART_QUOTE_LOOKBACK_SECONDS,
+    period2: nowInSeconds,
+    interval: "1d",
+  });
+  const meta = result.meta || {};
+  const bars = (result.quotes || []).filter((bar) => bar && bar.close !== null);
+  const lastBar = bars[bars.length - 1];
+  const tradeTime = meta.regularMarketTime ? new Date(meta.regularMarketTime) : null;
+  const isLastBarLatestSession =
+    lastBar && tradeTime && new Date(lastBar.date).toISOString().slice(0, 10) === tradeTime.toISOString().slice(0, 10);
+  const previousBar = isLastBarLatestSession ? bars[bars.length - 2] : lastBar;
+
+  if (typeof meta.regularMarketPrice !== "number") {
+    return null;
+  }
+
+  return {
+    symbol: meta.symbol || symbol,
+    regularMarketPrice: meta.regularMarketPrice,
+    regularMarketPreviousClose: previousBar ? previousBar.close : (meta.chartPreviousClose ?? null),
+    regularMarketTime: tradeTime,
+    marketState: marketStateFrom(meta.currentTradingPeriod, Date.now()),
+    bid: null,
+    ask: null,
+  };
+}
+
+// Chart quotes for several symbols, a few at a time; one that fails is left out
+async function getChartQuotes(symbols) {
+  const quotes = [];
+  let next = 0;
+
+  async function worker() {
+    while (next < symbols.length) {
+      const symbol = symbols[next++];
+
+      try {
+        const quote = await getChartQuote(symbol);
+
+        if (quote) {
+          quotes.push(quote);
+        }
+      } catch (error) {
+        console.warn(`Chart quote for ${symbol} failed: ${error.message}`);
+      }
+    }
+  }
+
+  await Promise.all(Array.from({ length: Math.min(CHART_QUOTE_CONCURRENCY, symbols.length) }, worker));
+
+  return quotes;
+}
+
 // Yahoo quotes for many symbols, keyed by symbol. Symbols cached within
-// QUOTE_TTL_MS are reused and the rest are fetched in one request; a
+// QUOTE_TTL_MS are reused and the rest are fetched in one request - or from
+// the chart endpoint when the quote endpoint fails or crumbs are paused -
+// with a stale quote standing in for any that still can't be fetched. A
 // symbol Yahoo doesn't know is just missing from the result.
 async function getQuotes(symbols) {
   const now = Date.now();
@@ -93,7 +234,14 @@ async function getQuotes(symbols) {
   });
 
   if (missing.length > 0) {
-    const results = await yahooFinance.quote(missing, {}, { validateResult: false });
+    let results;
+
+    try {
+      results = await withCrumb(() => yahooFinance.quote(missing, {}, { validateResult: false }));
+    } catch (error) {
+      console.warn(`Quote batch failed (${error.message}); using chart quotes`);
+      results = await getChartQuotes(missing);
+    }
 
     for (const quote of [].concat(results || [])) {
       if (quote && quote.symbol) {
@@ -119,8 +267,21 @@ async function getQuotes(symbols) {
 }
 
 function getOptions(ticker) {
-  return cached(`options:${ticker}`, OPTIONS_TTL_MS, () => yahooFinance.options(ticker));
+  return cached(`options:${ticker}`, OPTIONS_TTL_MS, () => withCrumb(() => yahooFinance.options(ticker)));
 }
+
+// Whether the server is up, and whether Yahoo is refusing crumbs (quotes
+// then come from charts, and research and movers from stale data)
+app.get("/api/health", (request, response) => {
+  const pausedForMs = Math.max(crumbPause.until - Date.now(), 0);
+
+  response.json({
+    status: "ok",
+    crumbCalls: pausedForMs > 0 ? "paused" : "ok",
+    pausedForSeconds: Math.ceil(pausedForMs / 1000),
+    lastCrumbError: crumbPause.lastError,
+  });
+});
 
 app.get("/api/candles/:ticker", async (request, response) => {
   const ticker = request.params.ticker.toUpperCase();
@@ -614,10 +775,8 @@ app.get("/api/movers", async (request, response) => {
   try {
     const movers = await cached("movers", MOVERS_TTL_MS, async () => {
       const fetchScreener = async (scrIds) => {
-        const result = await yahooFinance.screener(
-          { scrIds, count: MOVERS_COUNT },
-          undefined,
-          { validateResult: false },
+        const result = await withCrumb(() =>
+          yahooFinance.screener({ scrIds, count: MOVERS_COUNT }, undefined, { validateResult: false }),
         );
 
         return (result.quotes || [])
@@ -659,10 +818,8 @@ app.get("/api/profile/:ticker", async (request, response) => {
 
   try {
     const profile = await cached(`profile:${ticker}`, PROFILE_TTL_MS, async () => {
-      const result = await yahooFinance.quoteSummary(
-        ticker,
-        { modules: ["assetProfile", "quoteType"] },
-        { validateResult: false },
+      const result = await withCrumb(() =>
+        yahooFinance.quoteSummary(ticker, { modules: ["assetProfile", "quoteType"] }, { validateResult: false }),
       );
 
       return {
