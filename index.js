@@ -916,7 +916,7 @@ app.get("/api/splits/:ticker", async (request, response) => {
 
 const axios = require("axios");
 
-const ROBLOX_STATS_TTL_MS = 4 * 60 * 1000; // just under the game's five-minute tick
+const ROBLOX_STATS_TTL_MS = 45 * 1000; // just under the game's one-minute tick
 const MAX_ROBLOX_EXPERIENCES = 50; // Roblox's batch limit for these routes
 const ROBLOX_TIMEOUT_MS = 10 * 1000;
 
